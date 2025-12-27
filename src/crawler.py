@@ -32,6 +32,9 @@ class PriceCrawler:
             AbercrombieExtractor(),
         ]
 
+        # Browser instance for context manager support
+        self._browser = None
+
     def get_extractor(self, url: str) -> BaseExtractor:
         """
         Get the appropriate extractor for a URL.
@@ -50,6 +53,22 @@ class PriceCrawler:
                 return extractor
 
         raise ValueError(f"No extractor found for URL: {url}")
+
+    async def __aenter__(self):
+        """Initialize browser when entering context."""
+        browser_config = BrowserConfig(
+            headless=True,
+            verbose=False,
+        )
+        self._browser = AsyncWebCrawler(config=browser_config)
+        await self._browser.__aenter__()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Clean up browser when exiting context."""
+        if self._browser:
+            await self._browser.__aexit__(exc_type, exc_val, exc_tb)
+            self._browser = None
 
     async def scrape_item(self, url: str) -> Dict[str, Any]:
         """
@@ -70,12 +89,6 @@ class PriceCrawler:
         extractor = self.get_extractor(url)
         print(f"Using extractor: {extractor.__class__.__name__}")
 
-        # Configure browser with anti-detection
-        browser_config = BrowserConfig(
-            headless=True,
-            verbose=False,
-        )
-
         # Configure crawler
         run_config = CrawlerRunConfig(
             word_count_threshold=5,
@@ -85,34 +98,47 @@ class PriceCrawler:
             delay_before_return_html=3.0,  # Wait 3 seconds after page load
         )
 
-        # Scrape the page
-        async with AsyncWebCrawler(config=browser_config) as crawler:
-            result = await crawler.arun(url=url, config=run_config)
-
-            if not result.success:
-                raise Exception(f"Failed to crawl URL: {url}")
-
-            # Get the markdown content
-            markdown_content = result.markdown_v2.raw_markdown if result.markdown_v2 else result.markdown
-
-
-            # Use LLM to extract product data
-            print("Extracting product data with LLM...")
-            extracted_data = await self._extract_with_llm(
-                markdown_content,
-                extractor.get_extraction_prompt()
+        # Scrape the page using existing browser or create new one
+        if self._browser:
+            # Use existing browser instance from context manager
+            result = await self._browser.arun(url=url, config=run_config)
+        else:
+            # Fallback: create temporary browser for standalone use
+            browser_config = BrowserConfig(
+                headless=True,
+                verbose=False,
             )
+            async with AsyncWebCrawler(config=browser_config) as crawler:
+                result = await crawler.arun(url=url, config=run_config)
 
-            # Parse and normalize the data
-            product_data = extractor.parse_llm_response(extracted_data)
+        if not result.success:
+            raise Exception(f"Failed to crawl URL: {url}")
 
-            print(f"✓ Extracted: {product_data.get('name', 'Unknown')}")
-            print(f"  Brand: {product_data.get('brand', 'Unknown')}")
-            print(f"  Category: {product_data.get('category', 'Unknown')}")
-            print(f"  Price: ${product_data.get('sale_price', 'N/A')}")
-            print(f"  Sizes: {product_data.get('sizes_available', [])}")
+        # Get the markdown content - use fit_markdown for reduced token usage
+        markdown_content = (
+            result.markdown_v2.fit_markdown
+            if result.markdown_v2 and result.markdown_v2.fit_markdown
+            else result.markdown_v2.raw_markdown if result.markdown_v2
+            else result.markdown
+        )
 
-            return product_data
+        # Use LLM to extract product data
+        print("Extracting product data with LLM...")
+        extracted_data = await self._extract_with_llm(
+            markdown_content,
+            extractor.get_extraction_prompt()
+        )
+
+        # Parse and normalize the data
+        product_data = extractor.parse_llm_response(extracted_data)
+
+        print(f"✓ Extracted: {product_data.get('name', 'Unknown')}")
+        print(f"  Brand: {product_data.get('brand', 'Unknown')}")
+        print(f"  Category: {product_data.get('category', 'Unknown')}")
+        print(f"  Price: ${product_data.get('sale_price', 'N/A')}")
+        print(f"  Sizes: {product_data.get('sizes_available', [])}")
+
+        return product_data
 
     def _extract_product_section(self, markdown: str, max_chars: int = 20000) -> str:
         """
