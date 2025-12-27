@@ -202,6 +202,7 @@ Crawl4AI==0.4.247
 python-dotenv==1.0.1
 pydantic==2.10.6
 PyYAML==6.0.1
+groq>=0.13.0
 ```
 
 Note: SQLite is built into Python, no additional database driver needed!
@@ -242,5 +243,13 @@ Note: SQLite is built into Python, no additional database driver needed!
   - No server configuration needed
   - Simple file-based storage
 
+- ✓ Milestone 2: URL configuration & basic scraping
+  - YAML configuration for tracking URLs
+  - Crawl4AI integration with Groq LLM (llama-3.3-70b-versatile)
+  - Smart product section extraction (finds prices/content automatically)
+  - Abercrombie extractor with robust price parsing
+  - Successfully extracts: name, prices, colors, sizes
+  - Saves to database with full history tracking
+
 **Next Steps:**
-- Milestone 2: URL configuration & basic scraping
+- Milestone 3: Cron job for daily scraping
