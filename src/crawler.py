@@ -70,12 +70,13 @@ class PriceCrawler:
             await self._browser.__aexit__(exc_type, exc_val, exc_tb)
             self._browser = None
 
-    async def scrape_item(self, url: str) -> Dict[str, Any]:
+    async def scrape_item(self, url: str, colorway: Optional[str] = None) -> Dict[str, Any]:
         """
         Scrape a single product URL and extract pricing data.
 
         Args:
             url: Product URL to scrape
+            colorway: Optional colorway name to select (e.g., "White", "Black")
 
         Returns:
             Dictionary with extracted product data
@@ -84,19 +85,71 @@ class PriceCrawler:
             Exception: If scraping or extraction fails
         """
         print(f"Scraping: {url}")
+        if colorway:
+            print(f"  Selecting colorway: {colorway}")
 
         # Get the appropriate extractor
         extractor = self.get_extractor(url)
         print(f"Using extractor: {extractor.__class__.__name__}")
 
+        # Build JavaScript to click colorway if specified
+        js_code = None
+        if colorway:
+            # Get colorway selectors from extractor
+            selectors = extractor.get_colorway_selectors()
+            selectors_js = ', '.join([f'"{s}"' for s in selectors])
+
+            js_code = f"""
+            (async () => {{
+                const colorwayName = "{colorway}";
+                const selectors = [{selectors_js}];
+
+                console.log('Looking for colorway:', colorwayName);
+
+                // Try each selector
+                for (const selector of selectors) {{
+                    const swatches = document.querySelectorAll(selector);
+                    console.log(`Found ${{swatches.length}} elements with selector: ${{selector}}`);
+
+                    for (const swatch of swatches) {{
+                        // Check aria-label, title, alt, or text content
+                        const ariaLabel = swatch.getAttribute('aria-label') || '';
+                        const title = swatch.getAttribute('title') || '';
+                        const alt = swatch.getAttribute('alt') || '';
+                        const text = swatch.textContent || '';
+
+                        const combinedText = `${{ariaLabel}} ${{title}} ${{alt}} ${{text}}`.toLowerCase();
+
+                        if (combinedText.includes(colorwayName.toLowerCase())) {{
+                            console.log('Found matching colorway, clicking:', swatch);
+                            swatch.click();
+
+                            // Wait for page to update
+                            await new Promise(resolve => setTimeout(resolve, 2000));
+                            return true;
+                        }}
+                    }}
+                }}
+
+                console.log('Colorway not found:', colorwayName);
+                return false;
+            }})();
+            """
+
         # Configure crawler
-        run_config = CrawlerRunConfig(
-            word_count_threshold=5,
-            cache_mode="bypass",  # Always fetch fresh data
-            wait_until="networkidle",  # Wait for network to be idle
-            page_timeout=60000,  # 60 second timeout
-            delay_before_return_html=3.0,  # Wait 3 seconds after page load
-        )
+        run_config_params = {
+            "word_count_threshold": 5,
+            "cache_mode": "bypass",  # Always fetch fresh data
+            "wait_until": "networkidle",  # Wait for network to be idle
+            "page_timeout": 60000,  # 60 second timeout
+            "delay_before_return_html": 3.0,  # Wait 3 seconds after page load
+        }
+
+        # Add JavaScript execution if colorway specified
+        if js_code:
+            run_config_params["js_code"] = js_code
+
+        run_config = CrawlerRunConfig(**run_config_params)
 
         # Scrape the page using existing browser or create new one
         if self._browser:

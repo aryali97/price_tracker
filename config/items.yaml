@@ -1,3 +1,4 @@
 items:
   - url: "https://www.abercrombie.com/shop/us/p/essential-popover-hoodie-61791319?categoryId=12202&faceout=life&seq=48&pagefm=navigation-grid&prodvm=navigation-grid"
+    colorway: "White"  # Optional: specify colorway to select
   - url: "https://www.abercrombie.com/shop/us/p/essential-baggy-open-hem-sweatpant-60987819?categoryId=12202&faceout=prod&seq=30&afsource=social+proofing&pagefm=navigation-grid&prodvm=navigation-grid"

@@ -13,6 +13,7 @@ from pydantic import BaseModel, HttpUrl, field_validator
 class ItemConfig(BaseModel):
     """Configuration for a single item to track."""
     url: str
+    colorway: Optional[str] = None  # Optional: specific colorway to select (e.g., "White", "Black")
     scrape_frequency: str = "daily"
 
     @field_validator('url')

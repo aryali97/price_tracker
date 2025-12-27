@@ -15,11 +15,14 @@ from src.database import Database
 async def scrape_with_error_handling(crawler, db, item_config, index, total):
     """Scrape single item with error handling."""
     url = item_config.url
+    colorway = item_config.colorway
     print(f"[{index}/{total}] Scraping: {url[:60]}...")
+    if colorway:
+        print(f"  Colorway: {colorway}")
 
     try:
-        # Scrape
-        data = await crawler.scrape_item(url)
+        # Scrape with optional colorway
+        data = await crawler.scrape_item(url, colorway=colorway)
 
         # Save to DB
         item_id = db.add_item_if_new(
