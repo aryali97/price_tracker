@@ -58,7 +58,7 @@ class PriceCrawler:
         """Initialize browser when entering context."""
         browser_config = BrowserConfig(
             headless=True,
-            verbose=False,
+            verbose=True,  # Enable to see JavaScript console logs
         )
         self._browser = AsyncWebCrawler(config=browser_config)
         await self._browser.__aenter__()
@@ -97,44 +97,41 @@ class PriceCrawler:
         if colorway:
             # Get colorway selectors from extractor
             selectors = extractor.get_colorway_selectors()
-            selectors_js = ', '.join([f'"{s}"' for s in selectors])
+            # Use single quotes for selectors to avoid quote conflicts
+            selectors_js = ', '.join([f"'{s}'" for s in selectors])
 
-            js_code = f"""
-            (async () => {{
-                const colorwayName = "{colorway}";
-                const selectors = [{selectors_js}];
+            # Build JavaScript that waits for swatches to load, then clicks
+            js_code = (
+                "(async()=>{"
+                "const n='%s',s=%s;"
+                # Wait for swatches to load
+                "await new Promise(r=>setTimeout(r,2000));"
+                "console.log('[COLORWAY] Starting search for:',n);"
+                "for(const e of s){"
+                "const t=document.querySelectorAll(e);"
+                "console.log('[COLORWAY] Selector',e,'found',t.length,'elements');"
+                "for(let i=0;i<t.length;i++){"
+                "const el=t[i];"
+                "const txt=((el.getAttribute('aria-label')||'')+' '+(el.getAttribute('title')||'')+' '+"
+                "(el.getAttribute('alt')||'')+' '+(el.textContent||'').trim()).toLowerCase();"
+                "if(txt.includes(n.toLowerCase())){"
+                "console.log('[COLORWAY] FOUND! Clicking element',i);"
+                "el.scrollIntoView({block:'center'});"
+                "await new Promise(r=>setTimeout(r,500));"
+                "el.click();"
+                "await new Promise(r=>setTimeout(r,4000));"
+                "console.log('[COLORWAY] Click complete');"
+                "return true"
+                "}"
+                "}"
+                "}"
+                "console.log('[COLORWAY] Not found');"
+                "return false"
+                "})()"
+            ) % (colorway, f"[{selectors_js}]")
 
-                console.log('Looking for colorway:', colorwayName);
-
-                // Try each selector
-                for (const selector of selectors) {{
-                    const swatches = document.querySelectorAll(selector);
-                    console.log(`Found ${{swatches.length}} elements with selector: ${{selector}}`);
-
-                    for (const swatch of swatches) {{
-                        // Check aria-label, title, alt, or text content
-                        const ariaLabel = swatch.getAttribute('aria-label') || '';
-                        const title = swatch.getAttribute('title') || '';
-                        const alt = swatch.getAttribute('alt') || '';
-                        const text = swatch.textContent || '';
-
-                        const combinedText = `${{ariaLabel}} ${{title}} ${{alt}} ${{text}}`.toLowerCase();
-
-                        if (combinedText.includes(colorwayName.toLowerCase())) {{
-                            console.log('Found matching colorway, clicking:', swatch);
-                            swatch.click();
-
-                            // Wait for page to update
-                            await new Promise(resolve => setTimeout(resolve, 2000));
-                            return true;
-                        }}
-                    }}
-                }}
-
-                console.log('Colorway not found:', colorwayName);
-                return false;
-            }})();
-            """
+            # Debug output (comment out when not debugging)
+            # print(f"\n[DEBUG] Colorway JS:\n{js_code}\n")
 
         # Configure crawler
         run_config_params = {
@@ -147,7 +144,8 @@ class PriceCrawler:
 
         # Add JavaScript execution if colorway specified
         if js_code:
-            run_config_params["js_code"] = js_code
+            run_config_params["js_code"] = [js_code]  # Must be a list
+            run_config_params["delay_before_return_html"] = 6.0  # Extra time for colorway click
 
         run_config = CrawlerRunConfig(**run_config_params)
 
@@ -255,7 +253,7 @@ class PriceCrawler:
         client = AsyncGroq(api_key=self.groq_api_key)
 
         # Extract the most relevant product section
-        focused_markdown = self._extract_product_section(markdown, max_chars=20000)
+        focused_markdown = self._extract_product_section(markdown, max_chars=12000)
 
         # Build the full prompt
         full_prompt = f"{prompt}\n\nPage content:\n\n{focused_markdown}"
@@ -273,7 +271,7 @@ class PriceCrawler:
                         "content": full_prompt
                     }
                 ],
-                model="llama-3.3-70b-versatile",  # Updated model (llama-3.1 was decommissioned)
+                model="llama-3.3-70b-versatile",  # Larger context window (handles 6000+ tokens)
                 temperature=0.1,  # Low temperature for consistent extraction
                 max_tokens=1000,
             )
