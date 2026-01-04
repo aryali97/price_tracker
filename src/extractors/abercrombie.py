@@ -51,16 +51,119 @@ Rules:
 
 JSON output:"""
 
+    def get_learn_mode_prompt(self) -> str:
+        """
+        Get the LLM prompt for learn mode - extracts data AND selectors.
+
+        Returns:
+            Prompt string that asks LLM to return both data and CSS selectors
+        """
+        return """You are analyzing an e-commerce product page to extract BOTH product data AND the CSS selectors used to find that data.
+
+Your task:
+1. Extract the product information (name, price, sizes, etc.)
+2. Identify the CSS selectors that would reliably find each piece of data
+
+Return a JSON object with TWO sections:
+
+{
+  "data": {
+    "name": "Product name",
+    "brand": "Brand name",
+    "category": "Category (e.g., Hoodies, Jackets)",
+    "listed_price": 70.00,
+    "sale_price": 56.00,
+    "colorway_name": "Color name or null",
+    "sizes_available": ["XS", "S", "M", "L"]
+  },
+  "selectors": {
+    "name": {
+      "primary": "h1.product-title",
+      "fallbacks": [".product-name", "h1[data-testid='product-title']"],
+      "extraction": "text",
+      "required": true
+    },
+    "brand": {
+      "primary": ".product-brand",
+      "fallbacks": ["meta[property='og:brand']"],
+      "attribute": "content",
+      "extraction": "text",
+      "required": false
+    },
+    "category": {
+      "primary": ".breadcrumb-item:last-child",
+      "fallbacks": [".product-category"],
+      "extraction": "text",
+      "required": false
+    },
+    "listed_price": {
+      "primary": ".price-was",
+      "fallbacks": [".original-price", ".price-list"],
+      "extraction": "price",
+      "required": true
+    },
+    "sale_price": {
+      "primary": ".price-now",
+      "fallbacks": [".current-price", ".price-sale"],
+      "extraction": "price",
+      "required": true
+    },
+    "colorway_name": {
+      "primary": ".color-selected",
+      "fallbacks": ["button[aria-pressed='true'][data-testid^='swatch-']"],
+      "attribute": "aria-label",
+      "extraction": "text",
+      "required": false
+    },
+    "sizes_available": {
+      "primary": "button.size-button:not([disabled])",
+      "fallbacks": [".size-selector option:not([disabled])", "button[data-testid^='size-']:not([disabled])"],
+      "extraction": "list_text",
+      "required": true
+    }
+  }
+}
+
+CRITICAL RULES FOR SELECTORS:
+- Use CSS selectors ONLY (not XPath)
+- "primary" selector should be the MOST RELIABLE selector you found in the HTML
+- "fallbacks" should be alternative selectors that could also work
+- Be specific enough to avoid false matches, but generic enough to work across similar pages
+- For prices: always use extraction type "price"
+- For lists (like sizes): use extraction type "list_text"
+- For single text values: use extraction type "text"
+- If extracting from HTML attribute (like meta tags): specify "attribute" field
+
+SELECTOR QUALITY GUIDELINES:
+- PREFER: Class names, data attributes, semantic HTML tags
+- AVOID: Generic tags without qualifiers, positional selectors (nth-child)
+- Example GOOD: "button.size-button:not([disabled])"
+- Example BAD: "div > div > span:nth-child(3)"
+
+ABERCROMBIE-SPECIFIC PRICE SELECTORS:
+- Listed/original price: use .product-price-text[data-variant="original"]
+- Sale/discount price: use .product-price-text[data-variant="discount"]
+- Both prices have the same class but different data-variant attributes
+
+For "required" field:
+- true for critical fields (name, prices, sizes)
+- false for optional fields (brand, category, color)
+
+Return ONLY the JSON object with no explanatory text before or after."""
+
     def get_colorway_selectors(self) -> List[str]:
         """
         Get CSS selectors for Abercrombie color swatches.
+
+        Note: Abercrombie uses <a> tags inside swatch tile groups for colors.
+        Color names are typically in nested img alt attributes or hrefs.
 
         Returns:
             List of CSS selectors to try
         """
         return [
-            'button[data-testid^="swatch-"]',
-            '.product-swatch',
-            '[class*="ColorSwatch"]',
+            '[data-testid="swatch-tile-group"] a',
+            '.swatch-tile-group a',
+            '[class*="swatch"] a',
             'button[aria-label*="color"]'
         ]

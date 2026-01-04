@@ -35,10 +35,20 @@ class BaseExtractor(ABC):
     @abstractmethod
     def get_extraction_prompt(self) -> str:
         """
-        Get the LLM prompt for extracting product data.
+        Get the LLM prompt for extracting product data (legacy mode).
 
         Returns:
             Prompt string for LLM
+        """
+        pass
+
+    @abstractmethod
+    def get_learn_mode_prompt(self) -> str:
+        """
+        Get the LLM prompt for learn mode - extracts data AND selectors.
+
+        Returns:
+            Prompt string that asks LLM to return both data and selectors
         """
         pass
 
@@ -143,3 +153,70 @@ class BaseExtractor(ABC):
             Colorway name or None
         """
         return None
+
+    def parse_learn_mode_response(self, llm_response: str) -> Dict[str, Any]:
+        """
+        Parse learn mode LLM response into data + recipe.
+
+        Expected format:
+        {
+            "data": {...product data...},
+            "selectors": {...selector mappings...}
+        }
+
+        Args:
+            llm_response: Raw LLM response
+
+        Returns:
+            Dictionary with 'data' and 'recipe' keys
+
+        Raises:
+            ValueError: If response cannot be parsed or is missing required sections
+        """
+        import json
+
+        # Remove markdown code blocks
+        llm_response = re.sub(r'```json\s*', '', llm_response)
+        llm_response = re.sub(r'```\s*$', '', llm_response)
+        llm_response = llm_response.strip()
+
+        try:
+            parsed = json.loads(llm_response)
+
+            # Validate structure
+            if 'data' not in parsed or 'selectors' not in parsed:
+                raise ValueError("Learn mode response missing 'data' or 'selectors' sections")
+
+            # Normalize the data section
+            normalized_data = self.normalize_data(parsed['data'])
+
+            # Build recipe structure
+            recipe = {
+                'version': 1,
+                'selectors': parsed['selectors']
+            }
+
+            return {
+                'data': normalized_data,
+                'recipe': recipe
+            }
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Could not parse learn mode response as JSON: {e}")
+
+    def extract_site_domain(self, url: str) -> str:
+        """
+        Extract site domain from URL.
+
+        Args:
+            url: Full URL (e.g., 'https://www.abercrombie.com/shop/us/p/item-123')
+
+        Returns:
+            Domain without www (e.g., 'abercrombie.com')
+        """
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        domain = parsed.netloc
+        # Remove www. prefix if present
+        if domain.startswith('www.'):
+            domain = domain[4:]
+        return domain

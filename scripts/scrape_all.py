@@ -37,11 +37,20 @@ async def scrape_with_error_handling(crawler, db, item_config, index, total):
             colorway_name=data.get('colorway_name'),
             listed_price=data.get('listed_price'),
             sale_price=data.get('sale_price'),
-            sizes_available=data.get('sizes_available')
+            sizes_available=data.get('sizes_available'),
+            extraction_method=data.get('_extraction_method'),
+            recipe_id=data.get('_recipe_id'),
+            extraction_confidence=data.get('_confidence')
         )
 
         db.log_success(item_id)
-        print(f"✓ Saved: {data['name']} - ${data['sale_price']}\n")
+
+        # Format output
+        print(f"✓ Saved: {data['name']}")
+        print(f"  Listed Price: ${data.get('listed_price', 'N/A')}")
+        if data.get('sale_price') and data.get('sale_price') != data.get('listed_price'):
+            print(f"  Sale Price: ${data['sale_price']}")
+        print()
 
         return {"success": True, "url": url, "data": data}
 

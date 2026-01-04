@@ -88,6 +88,46 @@ class Database:
                 )
             """)
 
+            # Create extraction_recipes table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS extraction_recipes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    site_domain TEXT NOT NULL,
+                    recipe_version INTEGER DEFAULT 1,
+                    selectors TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_successful_use TIMESTAMP,
+                    success_count INTEGER DEFAULT 0,
+                    failure_count INTEGER DEFAULT 0,
+                    is_active INTEGER DEFAULT 1,
+                    avg_confidence REAL,
+                    UNIQUE(site_domain, recipe_version)
+                )
+            """)
+
+            # Create index on extraction_recipes
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_site_active
+                ON extraction_recipes(site_domain, is_active)
+            """)
+
+            # Alter price_history to add extraction tracking columns
+            # (use try/except since columns may already exist)
+            try:
+                cursor.execute("ALTER TABLE price_history ADD COLUMN extraction_method TEXT DEFAULT 'llm'")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
+            try:
+                cursor.execute("ALTER TABLE price_history ADD COLUMN recipe_id INTEGER")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
+            try:
+                cursor.execute("ALTER TABLE price_history ADD COLUMN extraction_confidence REAL")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
             conn.commit()
 
     @contextmanager
@@ -192,7 +232,10 @@ class Database:
                            listed_price: Optional[float] = None,
                            sale_price: Optional[float] = None,
                            sizes_available: Optional[List[str]] = None,
-                           screenshot_url: Optional[str] = None) -> int:
+                           screenshot_url: Optional[str] = None,
+                           extraction_method: Optional[str] = None,
+                           recipe_id: Optional[int] = None,
+                           extraction_confidence: Optional[float] = None) -> int:
         """
         Insert a price history record.
 
@@ -203,6 +246,9 @@ class Database:
             sale_price: Current sale price (optional)
             sizes_available: List of available sizes (optional)
             screenshot_url: Path to screenshot (optional)
+            extraction_method: 'llm' or 'direct' (optional)
+            recipe_id: ID of recipe used (optional)
+            extraction_confidence: Confidence score 0-1 (optional)
 
         Returns:
             Record ID
@@ -215,11 +261,13 @@ class Database:
 
                 query = """
                     INSERT INTO price_history
-                    (item_id, colorway_name, listed_price, sale_price, sizes_available, screenshot_url)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    (item_id, colorway_name, listed_price, sale_price, sizes_available,
+                     screenshot_url, extraction_method, recipe_id, extraction_confidence)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """
                 cursor.execute(query, (
-                    item_id, colorway_name, listed_price, sale_price, sizes_json, screenshot_url
+                    item_id, colorway_name, listed_price, sale_price, sizes_json,
+                    screenshot_url, extraction_method, recipe_id, extraction_confidence
                 ))
                 conn.commit()
                 return cursor.lastrowid
@@ -401,5 +449,167 @@ class Database:
                 if result and result[1] > 0:
                     return (result[0] / result[1]) * 100
                 return 0.0
+            finally:
+                cursor.close()
+
+    # ==================== EXTRACTION RECIPES TABLE ====================
+
+    def insert_recipe(self, site_domain: str, recipe_version: int,
+                     selectors: Dict[str, Any]) -> int:
+        """
+        Insert new extraction recipe.
+
+        Args:
+            site_domain: Site domain (e.g., 'abercrombie.com')
+            recipe_version: Recipe version number
+            selectors: Selector mappings dictionary
+
+        Returns:
+            Recipe ID
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                query = """
+                    INSERT INTO extraction_recipes
+                    (site_domain, recipe_version, selectors)
+                    VALUES (?, ?, ?)
+                """
+                cursor.execute(query, (
+                    site_domain,
+                    recipe_version,
+                    json.dumps(selectors)
+                ))
+                conn.commit()
+                return cursor.lastrowid
+            except sqlite3.Error as e:
+                conn.rollback()
+                raise Exception(f"Error inserting recipe: {e}")
+            finally:
+                cursor.close()
+
+    def get_active_recipe(self, site_domain: str) -> Optional[Dict[str, Any]]:
+        """
+        Get active recipe for a site.
+
+        Args:
+            site_domain: Site domain (e.g., 'abercrombie.com')
+
+        Returns:
+            Recipe dict or None if no active recipe exists
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                query = """
+                    SELECT * FROM extraction_recipes
+                    WHERE site_domain = ? AND is_active = 1
+                    ORDER BY recipe_version DESC
+                    LIMIT 1
+                """
+                cursor.execute(query, (site_domain,))
+                row = cursor.fetchone()
+                if row:
+                    result = dict(row)
+                    result['selectors'] = json.loads(result['selectors'])
+                    return result
+                return None
+            finally:
+                cursor.close()
+
+    def get_all_recipes(self, site_domain: str) -> List[Dict[str, Any]]:
+        """
+        Get all recipes for a site.
+
+        Args:
+            site_domain: Site domain
+
+        Returns:
+            List of recipe dicts
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                query = """
+                    SELECT * FROM extraction_recipes
+                    WHERE site_domain = ?
+                    ORDER BY recipe_version DESC
+                """
+                cursor.execute(query, (site_domain,))
+                results = [dict(row) for row in cursor.fetchall()]
+                for result in results:
+                    result['selectors'] = json.loads(result['selectors'])
+                return results
+            finally:
+                cursor.close()
+
+    def increment_recipe_success(self, recipe_id: int, confidence: float):
+        """
+        Record successful extraction.
+
+        Args:
+            recipe_id: Recipe ID
+            confidence: Extraction confidence score (0.0-1.0)
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                query = """
+                    UPDATE extraction_recipes
+                    SET success_count = success_count + 1,
+                        last_successful_use = CURRENT_TIMESTAMP,
+                        avg_confidence = COALESCE(
+                            (avg_confidence * success_count + ?) / (success_count + 1),
+                            ?
+                        )
+                    WHERE id = ?
+                """
+                cursor.execute(query, (confidence, confidence, recipe_id))
+                conn.commit()
+            except sqlite3.Error as e:
+                conn.rollback()
+                raise Exception(f"Error updating recipe success: {e}")
+            finally:
+                cursor.close()
+
+    def increment_recipe_failure(self, recipe_id: int):
+        """
+        Record failed extraction.
+
+        Args:
+            recipe_id: Recipe ID
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                query = """
+                    UPDATE extraction_recipes
+                    SET failure_count = failure_count + 1
+                    WHERE id = ?
+                """
+                cursor.execute(query, (recipe_id,))
+                conn.commit()
+            except sqlite3.Error as e:
+                conn.rollback()
+                raise Exception(f"Error updating recipe failure: {e}")
+            finally:
+                cursor.close()
+
+    def mark_recipe_inactive(self, recipe_id: int):
+        """
+        Mark recipe as inactive.
+
+        Args:
+            recipe_id: Recipe ID
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                query = "UPDATE extraction_recipes SET is_active = 0 WHERE id = ?"
+                cursor.execute(query, (recipe_id,))
+                conn.commit()
+            except sqlite3.Error as e:
+                conn.rollback()
+                raise Exception(f"Error marking recipe inactive: {e}")
             finally:
                 cursor.close()
