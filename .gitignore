@@ -1,3 +1,4 @@
 .env
 src/__pycache__
+src/extractors/__pycache__
 price_tracker.db
