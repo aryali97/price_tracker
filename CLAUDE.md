@@ -15,8 +15,64 @@ A clothing price tracker that crawls e-commerce websites (Abercrombie, Adidas, e
 
 1. **Anti-scraping measures**: Sites use throttling/spam prevention → Will use VPN/proxy rotation in future
 2. **Variable site structures**: Different sites serve content differently → Using LLM + Crawl4AI for adaptive parsing
-3. **Colorway complexity**: Some items (e.g., Abercrombie) show different prices for different colors at same URL → Need to click color selectors
+3. **Colorway complexity**: Some items (e.g., Abercrombie) show different prices for different colors at same URL → **SOLVED: Extract from Apollo GraphQL state**
 4. **Deal detection**: Ongoing sales complicate pricing → Track both listed and sale prices
+
+## Abercrombie Colorway Discovery Breakthrough
+
+**Key Discovery**: Abercrombie embeds all colorway data in a JavaScript object on the page:
+- **Apollo GraphQL state**: `window['APOLLO_STATE__product-mfe-web-service-ProductPageFrontend-config']`
+- **Contains**: All colorways, seq IDs, prices, images in a single page load
+- **No clicking needed**: Pure JSON extraction from HTML
+- **Fast**: Single page load vs 20+ clicks through swatches
+
+### Apollo State Structure
+```json
+{
+  "CACHE": {
+    "ROOT_QUERY": {
+      "collection({\"collectionId\":\"682490\",\"faceout\":\"\",\"productId\":\"61414825\"})": {
+        "collection": {
+          "products": [
+            {
+              "swatchName": "white",
+              "defaultSwatchSequence": "02",
+              "kicId": "KIC_122-5454-00891-100",
+              "prices": {
+                "list": {
+                  "discountPrice": "$48",
+                  "originalPrice": "$60"
+                }
+              }
+            },
+            {
+              "swatchName": "light brown",
+              "defaultSwatchSequence": "03",
+              "kicId": "KIC_122-5631-01161-406",
+              "prices": {
+                "list": {
+                  "discountPrice": "$56",
+                  "originalPrice": "$70"
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
+```
+
+**Path**: `CACHE → ROOT_QUERY → collection(...) → collection → products[]`
+
+### Extraction Benefits
+✅ **10x faster** - Single page load vs clicking 20 swatches
+✅ **Includes prices** - Discount and original prices per colorway
+✅ **No JavaScript interaction** - Pure HTML parsing
+✅ **Reliable** - No timing issues or anti-bot detection
+
+**Note**: Size availability still requires visiting individual colorway URLs (`?seq=XX`)
 
 ## Database Schema (SQLite)
 
@@ -61,6 +117,30 @@ CREATE TABLE scrape_logs (
     FOREIGN KEY (item_id) REFERENCES items(id) ON DELETE SET NULL
 );
 ```
+
+### `item_colorways` table (Planned - Milestone 4)
+```sql
+CREATE TABLE item_colorways (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id INTEGER NOT NULL,
+    colorway_name TEXT NOT NULL,
+    colorway_url TEXT NOT NULL,
+    seq_param TEXT,  -- The ?seq=XX parameter value
+    is_tracked INTEGER DEFAULT 1,
+    discovered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_scraped_at TIMESTAMP,
+    UNIQUE(item_id, colorway_name),
+    FOREIGN KEY (item_id) REFERENCES items(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_item_colorways ON item_colorways(item_id, is_tracked);
+```
+
+**Purpose**: Store discovered colorways with their seq URLs for efficient re-scraping
+
+**Workflow**:
+1. **Discovery phase**: Extract all colorways from Apollo state → Insert into `item_colorways`
+2. **Scraping phase**: Query tracked colorways → Visit each URL → Save sizes to `price_history`
 
 **Notes:**
 - `is_in_stock` field removed - determined by `sizes_available` (empty = out of stock)
@@ -108,9 +188,18 @@ price_tracker/
 - Automate daily price tracking
 - Files: `scripts/daily_scrape.py`, `src/utils.py`
 
-### Milestone 4: Multi-Colorway Support
-- Detect and scrape all colorways for a product
-- Use page interaction (clicking color selectors)
+### Milestone 4: Multi-Colorway Support (In Progress)
+- **Discovery**: Extract all colorways from Apollo GraphQL state (single page load)
+- **Database**: Store colorways in `item_colorways` table with seq URLs
+- **Scraping**: Visit each colorway URL to get size availability
+- **No clicking needed**: Pure JSON extraction from embedded JavaScript object
+
+**Current Status**: Building `test_apollo_extraction.py` to validate extraction approach
+
+**Files**:
+- `test_apollo_extraction.py` - Validation script
+- `src/extractors/abercrombie.py` - Apollo state extraction methods
+- `src/database.py` - Add `item_colorways` table and CRUD methods
 
 ### Milestone 5: Category Crawling
 - Crawl entire category (e.g., all "Men's Polos")
@@ -151,22 +240,51 @@ async with AsyncWebCrawler(config=browser_config) as crawler:
     result = await crawler.arun(url=item_url, config=run_config)
 ```
 
-### Colorway Interaction
+### Apollo State Extraction (Abercrombie)
 ```python
-# Click color selectors using js_code
-js_interaction = f"""
-const colorBtn = document.querySelector('{selector}');
-if (colorBtn) colorBtn.click();
-"""
+import re
+import json
 
-config = CrawlerRunConfig(
-    js_code=js_interaction,
-    session_id=f"item_{item_id}",
-    wait_for="networkidle"
-)
+# Extract Apollo state from HTML using balanced brace parsing
+start_pattern = r"window\['APOLLO_STATE__product-mfe-web-service-ProductPageFrontend-config'\]\s*=\s*"
+start_match = re.search(start_pattern, html)
+start_pos = start_match.end()
 
-result = await crawler.arun(url=url, config=config)
+# Parse balanced braces to get complete JSON
+brace_count = 0
+for i, char in enumerate(html[start_pos:], start=start_pos):
+    if char == '{':
+        brace_count += 1
+    elif char == '}':
+        brace_count -= 1
+        if brace_count == 0:
+            apollo_data = json.loads(html[start_pos:i+1])
+            break
+
+# Navigate to products: CACHE → ROOT_QUERY → collection(...) → collection → products[]
+cache = apollo_data.get('CACHE', {})
+root_query = cache.get('ROOT_QUERY', {})
+
+colorways = []
+for key, value in root_query.items():
+    if key.startswith('collection('):
+        products = value.get('collection', {}).get('products', [])
+
+        for product in products:
+            colorways.append({
+                'name': product['swatchName'],
+                'seq': product['defaultSwatchSequence'],
+                'url': f"{base_url}?seq={product['defaultSwatchSequence']}",
+                'discount_price': product.get('prices', {}).get('list', {}).get('discountPrice'),
+                'original_price': product.get('prices', {}).get('list', {}).get('originalPrice')
+            })
 ```
+
+**Benefits**:
+- Single page load gets all ~20 colorways
+- No clicking, no timing issues
+- Prices included in extraction
+- Proper brace balancing handles complex JSON
 
 ## Configuration Format (YAML)
 
@@ -230,20 +348,22 @@ Note: SQLite is built into Python, no additional database driver needed!
 - Weekly snapshots for 6-12 months
 - Monthly snapshots after 1 year
 
+### Test Script Best Practices
+- **Clean output only**: Print essential information to console
+- **No file persistence**: Avoid saving test data to JSON/files unless specifically needed for debugging
+- **Minimal dependencies**: Keep test scripts focused on validation, not production features
+- **Remove debug code**: Clean up debugging statements before finalizing test scripts
+
 ## Current Status
 
-**Completed:**
-- Initial Crawl4AI test (test.py)
-- Requirements defined
-- Architecture planned
+### Completed Milestones
 
-**Completed:**
-- ✓ Milestone 1: Database setup (SQLite)
+✅ **Milestone 1: Database setup (SQLite)**
   - Database auto-initializes on first use
   - No server configuration needed
   - Simple file-based storage
 
-- ✓ Milestone 2: URL configuration & basic scraping
+✅ **Milestone 2: URL configuration & basic scraping**
   - YAML configuration for tracking URLs
   - Crawl4AI integration with Groq LLM (llama-3.3-70b-versatile)
   - Smart product section extraction (finds prices/content automatically)
@@ -251,5 +371,21 @@ Note: SQLite is built into Python, no additional database driver needed!
   - Successfully extracts: name, prices, colors, sizes
   - Saves to database with full history tracking
 
-**Next Steps:**
-- Milestone 3: Cron job for daily scraping
+### In Progress
+
+🚧 **Milestone 4: Multi-Colorway Support**
+  - **Breakthrough**: Discovered Apollo GraphQL state embedded in Abercrombie pages
+  - **Current Task**: Building `test_apollo_extraction.py` to validate extraction
+  - **What it does**:
+    - Extracts all 20 colorways from single page load
+    - Gets seq IDs for building colorway URLs (`?seq=02`, `?seq=24`, etc.)
+    - Includes prices (discount and original) per colorway
+    - No JavaScript clicking required - pure JSON parsing
+  - **Next**:
+    - Validate test script works
+    - Add `item_colorways` table to database
+    - Integrate into main crawler
+
+### Deferred
+
+⏸️ **Milestone 3: Cron job** - Will implement after colorway support is complete
